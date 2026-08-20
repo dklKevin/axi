@@ -112,6 +112,36 @@ export function isUpdateAvailable(current: string, latest: string): boolean {
   return compareSemver(latest, current) > 0;
 }
 
+/** True when `version` is a concrete semver, not a floating tag or range. */
+export function isConcreteVersion(version: string): boolean {
+  return parseSemver(version) !== null;
+}
+
+/**
+ * Require a concrete semver so install commands never float on `@latest` or
+ * another dist-tag. Throws `AxiError` when the value is not installable as-is.
+ */
+export function requireConcreteVersion(
+  version: string,
+  packageName: string,
+): string {
+  if (!isConcreteVersion(version)) {
+    throw new AxiError(
+      `Refusing to install ${packageName}@${version}: not a concrete semver`,
+      "UPDATE_ERROR",
+      [
+        "The npm registry must return a specific version, not a floating tag such as latest",
+        `Run \`npm view ${packageName} version\` to check manually`,
+      ],
+    );
+  }
+  return version;
+}
+
+function packageSpec(packageName: string, version: string): string {
+  return `${packageName}@${requireConcreteVersion(version, packageName)}`;
+}
+
 /** Package metadata resolved from the nearest named `package.json`. */
 export interface PackageIdentity {
   /** npm package name, when a named package.json was found. */
@@ -402,19 +432,22 @@ export interface UpgradePlan {
 export function planUpgrade(
   method: InstallMethod,
   packageName: string,
+  version: string,
 ): UpgradePlan {
+  const spec = packageSpec(packageName, version);
+
   switch (method.kind) {
     case "npm-global":
       return {
         method: method.kind,
-        command: `npm install -g ${packageName}@latest`,
-        argv: ["npm", "install", "-g", `${packageName}@latest`],
+        command: `npm install -g ${spec}`,
+        argv: ["npm", "install", "-g", spec],
       };
     case "pnpm-global":
       return {
         method: method.kind,
-        command: `pnpm add -g ${packageName}@latest`,
-        argv: ["pnpm", "add", "-g", `${packageName}@latest`],
+        command: `pnpm add -g ${spec}`,
+        argv: ["pnpm", "add", "-g", spec],
       };
     case "homebrew":
       if (method.formula) {
@@ -433,14 +466,14 @@ export function planUpgrade(
     case "npx":
       return {
         method: method.kind,
-        command: `npx -y ${packageName}@latest`,
+        command: `npx -y ${spec}`,
         argv: null,
-        note: "npx always runs the latest published version, so no install is needed",
+        note: "npx is ephemeral, so no persistent install is needed",
       };
     case "unknown":
       return {
         method: method.kind,
-        command: `npm install -g ${packageName}@latest`,
+        command: `npm install -g ${spec}`,
         argv: null,
         note: "Could not determine how this tool was installed",
       };
@@ -558,7 +591,7 @@ async function fetchRegistryVersion(
     );
     if (response.ok) {
       const data = (await response.json()) as { version?: unknown };
-      if (typeof data.version === "string" && data.version.length > 0) {
+      if (typeof data.version === "string" && isConcreteVersion(data.version)) {
         return data.version;
       }
     } else if (response.status === 404) {
@@ -608,7 +641,7 @@ export async function fetchLatestVersion(
     options.npmView ??
     ((name: string) => npmViewVersion(name, options.platform))
   )(packageName);
-  if (viewed) {
+  if (viewed && isConcreteVersion(viewed)) {
     return viewed;
   }
 
@@ -835,7 +868,10 @@ export async function runUpdate(
   const fetchLatest =
     options.fetchLatest ??
     ((name: string) => fetchLatestVersion(name, { platform }));
-  const latest = await fetchLatest(packageName);
+  const latest = requireConcreteVersion(
+    await fetchLatest(packageName),
+    packageName,
+  );
   const available = isUpdateAvailable(current, latest);
 
   if (mode === "check") {
@@ -857,12 +893,12 @@ export async function runUpdate(
   const method: InstallMethod = entry
     ? detectInstallMethod({ entry, env: options.env })
     : { kind: "unknown" };
-  const plan = planUpgrade(method, packageName);
+  const plan = planUpgrade(method, packageName, latest);
 
   if (!plan.argv) {
     const help =
       method.kind === "npx"
-        ? `Re-run with \`${plan.command}\` to use the latest version`
+        ? `Re-run with \`${plan.command}\` to use that version`
         : `Run \`${plan.command}\` to upgrade`;
     return {
       update: {

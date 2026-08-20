@@ -6,9 +6,11 @@ import {
   detectInstallMethod,
   fetchLatestVersion,
   isUpdateAvailable,
+  isConcreteVersion,
   parseSemver,
   planUpgrade,
   readNearestPackageJson,
+  requireConcreteVersion,
   runUpdate,
   type IdentityFs,
   type InstallResult,
@@ -70,6 +72,23 @@ describe("isUpdateAvailable", () => {
     expect(isUpdateAvailable("1.2.3", "1.3.0")).toBe(true);
     expect(isUpdateAvailable("1.3.0", "1.3.0")).toBe(false);
     expect(isUpdateAvailable("1.3.0", "1.2.9")).toBe(false);
+  });
+});
+
+describe("isConcreteVersion / requireConcreteVersion", () => {
+  it("accepts concrete semver and rejects floating tags", () => {
+    expect(isConcreteVersion("1.3.0")).toBe(true);
+    expect(isConcreteVersion("2.0.0-beta.1")).toBe(true);
+    expect(isConcreteVersion("latest")).toBe(false);
+    expect(isConcreteVersion("next")).toBe(false);
+    expect(isConcreteVersion("^1.2.3")).toBe(false);
+  });
+
+  it("throws AxiError for a floating tag", () => {
+    expect(() => requireConcreteVersion("latest", "gh-axi")).toThrow(AxiError);
+    expect(() => requireConcreteVersion("latest", "gh-axi")).toThrow(
+      /not a concrete semver/,
+    );
   });
 });
 
@@ -266,20 +285,33 @@ describe("detectInstallMethod", () => {
 });
 
 describe("planUpgrade", () => {
-  it("plans runnable npm and pnpm upgrades", () => {
-    expect(planUpgrade({ kind: "npm-global" }, "gh-axi")).toMatchObject({
-      command: "npm install -g gh-axi@latest",
-      argv: ["npm", "install", "-g", "gh-axi@latest"],
+  it("plans runnable npm and pnpm upgrades pinned to a concrete version", () => {
+    expect(
+      planUpgrade({ kind: "npm-global" }, "gh-axi", "1.3.0"),
+    ).toMatchObject({
+      command: "npm install -g gh-axi@1.3.0",
+      argv: ["npm", "install", "-g", "gh-axi@1.3.0"],
     });
-    expect(planUpgrade({ kind: "pnpm-global" }, "gh-axi")).toMatchObject({
-      command: "pnpm add -g gh-axi@latest",
-      argv: ["pnpm", "add", "-g", "gh-axi@latest"],
+    expect(
+      planUpgrade({ kind: "pnpm-global" }, "gh-axi", "1.3.0"),
+    ).toMatchObject({
+      command: "pnpm add -g gh-axi@1.3.0",
+      argv: ["pnpm", "add", "-g", "gh-axi@1.3.0"],
     });
+  });
+
+  it("refuses to plan an install of a floating tag", () => {
+    expect(() =>
+      planUpgrade({ kind: "npm-global" }, "gh-axi", "latest"),
+    ).toThrow(AxiError);
+    expect(() =>
+      planUpgrade({ kind: "pnpm-global" }, "gh-axi", "latest"),
+    ).toThrow(/not a concrete semver/);
   });
 
   it("plans a runnable brew upgrade when the formula is known", () => {
     expect(
-      planUpgrade({ kind: "homebrew", formula: "gh-axi" }, "gh-axi"),
+      planUpgrade({ kind: "homebrew", formula: "gh-axi" }, "gh-axi", "1.3.0"),
     ).toMatchObject({
       command: "brew upgrade gh-axi",
       argv: ["brew", "upgrade", "gh-axi"],
@@ -288,10 +320,16 @@ describe("planUpgrade", () => {
 
   it("is print-only for brew without a formula, npx, and unknown", () => {
     expect(
-      planUpgrade({ kind: "homebrew", formula: null }, "gh-axi").argv,
+      planUpgrade({ kind: "homebrew", formula: null }, "gh-axi", "1.3.0").argv,
     ).toBeNull();
-    expect(planUpgrade({ kind: "npx" }, "gh-axi").argv).toBeNull();
-    expect(planUpgrade({ kind: "unknown" }, "gh-axi").argv).toBeNull();
+    expect(planUpgrade({ kind: "npx" }, "gh-axi", "1.3.0")).toMatchObject({
+      command: "npx -y gh-axi@1.3.0",
+      argv: null,
+    });
+    expect(planUpgrade({ kind: "unknown" }, "gh-axi", "1.3.0")).toMatchObject({
+      command: "npm install -g gh-axi@1.3.0",
+      argv: null,
+    });
   });
 });
 
@@ -425,6 +463,20 @@ describe("fetchLatestVersion", () => {
     expect(npmView).toHaveBeenCalledWith("ghost-axi");
   });
 
+  it("ignores a non-semver registry version and falls back to npm view", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ version: "latest" }),
+    }));
+    const npmView = vi.fn(async () => "3.1.4");
+
+    await expect(
+      fetchLatestVersion("gh-axi", { fetchImpl, npmView }),
+    ).resolves.toBe("3.1.4");
+    expect(npmView).toHaveBeenCalledWith("gh-axi");
+  });
+
   it("throws a network AxiError when both paths fail", async () => {
     const fetchImpl = vi.fn(async () => {
       throw new Error("offline");
@@ -539,11 +591,27 @@ describe("runUpdate", () => {
     });
 
     const plan = runInstall.mock.calls[0]?.[0] as UpgradePlan;
-    expect(plan.command).toBe("npm install -g gh-axi@latest");
+    expect(plan.command).toBe("npm install -g gh-axi@1.3.0");
     expect(output).toMatchObject({
       update: "gh-axi upgraded 1.2.3 -> 1.3.0",
-      command: "npm install -g gh-axi@latest",
+      command: "npm install -g gh-axi@1.3.0",
     });
+  });
+
+  it("refuses to install when fetchLatest returns a floating tag", async () => {
+    const runInstall = vi.fn();
+    const error = await runUpdate({
+      ...baseDeps,
+      args: [],
+      stdout,
+      fetchLatest: async () => "latest",
+      runInstall,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AxiError);
+    expect((error as AxiError).code).toBe("UPDATE_ERROR");
+    expect((error as AxiError).message).toContain("not a concrete semver");
+    expect(runInstall).not.toHaveBeenCalled();
   });
 
   it("does not auto-install from local lib/node_modules project paths", async () => {
@@ -565,7 +633,7 @@ describe("runUpdate", () => {
     });
 
     expect(output).toMatchObject({
-      update: { action: "manual", run: "npm install -g gh-axi@latest" },
+      update: { action: "manual", run: "npm install -g gh-axi@1.3.0" },
     });
     expect(runInstall).not.toHaveBeenCalled();
   });
@@ -589,7 +657,7 @@ describe("runUpdate", () => {
     });
 
     expect(output).toMatchObject({
-      update: { action: "manual", run: "npm install -g gh-axi@latest" },
+      update: { action: "manual", run: "npm install -g gh-axi@1.3.0" },
     });
     expect(runInstall).not.toHaveBeenCalled();
   });
@@ -613,7 +681,7 @@ describe("runUpdate", () => {
     });
 
     expect(output).toMatchObject({
-      update: { action: "manual", run: "npm install -g gh-axi@latest" },
+      update: { action: "manual", run: "npm install -g gh-axi@1.3.0" },
     });
     expect(runInstall).not.toHaveBeenCalled();
   });
@@ -637,7 +705,7 @@ describe("runUpdate", () => {
     });
 
     expect(output).toMatchObject({
-      update: { action: "manual", run: "npm install -g gh-axi@latest" },
+      update: { action: "manual", run: "npm install -g gh-axi@1.3.0" },
     });
     expect(runInstall).not.toHaveBeenCalled();
   });
@@ -659,7 +727,7 @@ describe("runUpdate", () => {
     });
 
     expect(output).toMatchObject({
-      update: { action: "manual", run: "npx -y gh-axi@latest" },
+      update: { action: "manual", run: "npx -y gh-axi@1.3.0" },
     });
     expect(runInstall).not.toHaveBeenCalled();
   });
@@ -818,11 +886,11 @@ describe("default install runner", () => {
 
       expect(spawn).toHaveBeenCalledWith(
         "npm",
-        ["install", "-g", "gh-axi@latest"],
+        ["install", "-g", "gh-axi@1.3.0"],
         { stdio: ["ignore", "pipe", "pipe"], shell: false },
       );
       expect(stdout.write).toHaveBeenCalledWith(
-        "running: npm install -g gh-axi@latest\n",
+        "running: npm install -g gh-axi@1.3.0\n",
       );
       expect(stdout.write).not.toHaveBeenCalledWith(
         expect.stringContaining("installer stdout"),
@@ -895,13 +963,13 @@ describe("default install runner", () => {
       expect(spawn).toHaveBeenNthCalledWith(
         1,
         "npm.cmd",
-        ["install", "-g", "gh-axi@latest"],
+        ["install", "-g", "gh-axi@1.3.0"],
         { stdio: ["ignore", "pipe", "pipe"], shell: true },
       );
       expect(spawn).toHaveBeenNthCalledWith(
         2,
         "pnpm.cmd",
-        ["add", "-g", "gh-axi@latest"],
+        ["add", "-g", "gh-axi@1.3.0"],
         { stdio: ["ignore", "pipe", "pipe"], shell: true },
       );
     } finally {
