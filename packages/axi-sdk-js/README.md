@@ -68,21 +68,21 @@ update:
 help[1]: Run `gh-axi update` to upgrade
 
 $ gh-axi update
-running: npm install -g gh-axi@latest
+running: npm install -g gh-axi@1.3.0
 update: gh-axi upgraded 1.2.3 -> 1.3.0
-command: npm install -g gh-axi@latest
+command: npm install -g gh-axi@1.3.0
 ```
 
 How it works:
 
 - **Identity is auto-derived.** The package name and version are read from the nearest `package.json` (walking up from the realpath-resolved entrypoint). `version` from `runAxiCli()` is preferred when present. No wiring needed.
-- **The latest version comes from the registry.** It queries `https://registry.npmjs.org/<pkg>/latest`, falling back to `npm view <pkg> version`, and compares with proper semver. Network, registry, and not-found failures surface as structured `AxiError`s.
-- **The upgrade matches the install method**, detected from the entrypoint path and environment:
-  - npm global -> `npm install -g <pkg>@latest`
-  - pnpm global -> `pnpm add -g <pkg>@latest`
+- **The latest version comes from the registry.** It queries `https://registry.npmjs.org/<pkg>/latest`, falling back to `npm view <pkg> version`, and compares with proper semver. The resolved version must be concrete semver — floating tags such as `latest` are rejected. Network, registry, and not-found failures surface as structured `AxiError`s.
+- **The upgrade matches the install method**, detected from the entrypoint path and environment. Install commands pin the resolved version (`<pkg>@<version>`), never a silent `@latest`:
+  - npm global -> `npm install -g <pkg>@<version>`
+  - pnpm global -> `pnpm add -g <pkg>@<version>`
   - Homebrew (`/Cellar/`) -> `brew upgrade <formula>`
-  - npx / ephemeral cache -> reports that `npx -y <pkg>@latest` already runs the latest (print-only)
-  - unknown -> prints the recommended command without guessing (print-only)
+  - npx / ephemeral cache -> reports `npx -y <pkg>@<version>` (print-only)
+  - unknown -> prints the recommended pinned command without guessing (print-only)
 - **`update --check`** (a/k/a `--dry-run`) reports current vs latest and whether an update is available, installing nothing. When already on the latest version, `update` reports up-to-date and exits 0.
 - **Discoverability is SDK-owned.** Bare `--help` gets a compact built-in command footer when the tool has not registered its own `update`, and `<tool> update --help` shows the command reference.
 
@@ -118,7 +118,7 @@ Most AXI authors should not need these directly.
 | `RESERVED_COMMANDS`                      | SDK-owned built-in command names, currently `update`                                            |
 | `runUpdate()`                            | The built-in self-update flow (registry lookup, install-method detection, upgrade)              |
 | `fetchLatestVersion()`                   | Resolve the latest npm version through the registry endpoint with an `npm view` fallback        |
-| `detectInstallMethod()`, `planUpgrade()` | Inspect an entrypoint path and map it to the upgrade command the built-in updater would use     |
+| `detectInstallMethod()`, `planUpgrade()` | Inspect an entrypoint path and map it to a version-pinned upgrade command                       |
 | `compareSemver()`, `isUpdateAvailable()` | Semver helpers used by the updater, including prerelease ordering                               |
 | `installSessionStartHooks()`             | Install or repair Claude Code hooks, Codex hooks, and OpenCode ambient context plugins directly |
 | `sessionStartHookStatus()`               | Report install status for Claude Code, Codex, and OpenCode at a given scope, without writing    |
